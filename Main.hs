@@ -7,8 +7,11 @@ import Data.Time.Clock
 import qualified Data.Trie as T
 import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as MV
+import Graphics.Text.TrueType
 import "GLFW-b" Graphics.UI.GLFW as GLFW
+import LambdaCube.Font.Atlas
 import LambdaCube.Font.Common
+import LambdaCube.Font.CompositeDistanceField
 import LambdaCube.GL
 import LambdaCube.GL.Mesh
 import System.Environment
@@ -20,7 +23,7 @@ data SpreadState
       , spreadFactor :: MV.IOVector Float
       }
 
-windowWidth, windowHeight :: Integral n => n
+windowWidth, windowHeight :: Num n => n
 windowWidth = 1024
 windowHeight = 768
 
@@ -98,6 +101,9 @@ updateInfectionTexture tex (I ci _ sf) = do
     bmp <- MV.unsafeWith bytes $ \ptr -> copyBitmapFromPtr (size, size) 4 0 ptr Nothing
     updateTexture2DRGBAF tex False (unsafeFreezeBitmap bmp)
 
+textStyle = defaultTextStyle { textLetterSpacing = 0.0, textLineHeight = 1.25 }
+fontOptions = defaultOptions { atlasSize = 1024, atlasLetterPadding = 2 }
+
 main :: IO ()
 main = do
     GLFW.init
@@ -115,15 +121,32 @@ main = do
             keyState <- getKey mainWindow key
             return (keyState == KeyState'Pressed)
 
+    Right font <- loadFontFile "ArkitechLight.ttf"
+    let letterScale = 64
+    atlas <- createFontAtlas font fontRenderer fontOptions { atlasLetterScale = letterScale }
+
     renderer <- compileRenderer (ScreenOut (PrjFrameBuffer "" tix0 renderInfection))
     setScreenSize renderer windowWidth windowHeight
     let uniforms = uniformSetter renderer
+        aspect = fromIntegral windowHeight / fromIntegral windowWidth
+        letterScale = atlasLetterScale (atlasOptions atlas)
+        letterPadding = atlasLetterPadding (atlasOptions atlas)
+
+    uniformFTexture2D "fontAtlas" uniforms (getTextureData atlas)
+
+    textMesh <- buildTextMesh atlas textStyle "POWER: 0"
+    textBuffer <- compileMesh textMesh
+    textObject <- addMesh renderer "textMesh" textBuffer []
+    let textScale = 0.15
+    uniformM33F "textTransform" uniforms (V3 (V3 (textScale * aspect) 0 0) (V3 0 textScale 0) (V3 (-aspect) (-1 + textScale * 0.1) 1))
+    uniformFloat "outlineWidth" uniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale * sqrt 2 * 0.75)))
 
     quadBuffer <- compileMesh quadMesh
     quadObject <- addMesh renderer "infectionMesh" quadBuffer []
 
     infectionMap <- createInfectionTexture
     uniformFTexture2D "infectionMap" uniforms infectionMap
+    uniformM33F "infectionTransform" uniforms (V3 (V3 (2 * aspect) 0 0) (V3 0 2 0) (V3 (-aspect) (-1) 1))
 
     startTime <- getCurrentTime
 
@@ -131,42 +154,60 @@ main = do
     s <- case args of
         [] -> createEmptyState
         (path:_) -> loadLevel path
-    fix $ \loop -> do
+    flip fix (0, False, textObject) $ \loop (powerUsed, mouseWasPressed, oldTextObject) -> do
         forM_ [0, 0.2, 0.4] (spreadInfection s)
-        let aspect = fromIntegral windowHeight / fromIntegral windowWidth
-        uniformM33F "infectionTransform" uniforms (V3 (V3 (2 * aspect) 0 0) (V3 0 2 0) (V3 (-aspect) (-1) 1))
         updateInfectionTexture infectionMap s
+        textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed)
+        textBuffer <- compileMesh textMesh
+        removeObject renderer oldTextObject
+        newTextObject <- addMesh renderer "textMesh" textBuffer []
         render renderer
         swapBuffers mainWindow
         pollEvents
         escPressed <- keyIsPressed Key'Escape
-        mousePressed <- getMouseButton mainWindow MouseButton'1
-        when (mousePressed == MouseButtonState'Pressed) $ do
+        mouseState <- getMouseButton mainWindow MouseButton'1
+        let mousePressed = mouseState == MouseButtonState'Pressed
+            mouseClicked = mousePressed && not mouseWasPressed
+        when mouseClicked $ do
             (mx, my) <- getCursorPos mainWindow
             let x = round ((mx - 128) / 12)
                 y = 63 - round (my / 12)
             infectSpot s x y 10
-        unless escPressed loop
+        let powerUsed' = powerUsed + 1 + if mouseClicked then 100 else 0
+        unless escPressed $ loop (powerUsed', mousePressed, newTextObject)
 
     destroyWindow mainWindow
     terminate
 
 renderInfection :: Exp Obj (FrameBuffer 1 V4F)
-renderInfection = renderQuad emptyBuffer
+renderInfection = renderText (renderQuad emptyBuffer)
   where
+    renderText = Accumulate textFragmentCtx PassAll textFragmentShader textFragmentStream
     renderQuad = Accumulate quadFragmentCtx PassAll quadFragmentShader quadFragmentStream
     emptyBuffer = FrameBuffer (ColorImage n1 (V4 0 0 0 1) :. ZT)
     rasterCtx = TriangleCtx CullNone PolygonFill NoOffset LastVertex
 
+    textFragmentCtx = AccumulationContext Nothing (ColorOp textBlending (V4 True True True True) :. ZT)
+    textBlending = Blend (FuncAdd, FuncAdd) ((One, One), (OneMinusSrcAlpha, One)) zero'
+    textFragmentStream = Rasterize rasterCtx textStream
+    textStream = Transform (vertexShader "textTransform") (Fetch "textMesh" Triangles (IV2F "position", IV2F "uv"))
+
     quadFragmentCtx = AccumulationContext Nothing (ColorOp NoBlending (V4 True True True True) :. ZT)
     quadFragmentStream = Rasterize rasterCtx quadStream
-    quadStream = Transform vertexShader (Fetch "infectionMesh" Triangles (IV2F "position", IV2F "uv"))
+    quadStream = Transform (vertexShader "infectionTransform") (Fetch "infectionMesh" Triangles (IV2F "position", IV2F "uv"))
 
-    vertexShader attr = VertexOut point (floatV 1) ZT (Smooth uv :. ZT)
+    vertexShader transName attr = VertexOut point (floatV 1) ZT (Smooth uv :. ZT)
       where
         point = v3v4 (transform @*. v2v3 pos)
-        transform = Uni (IM33F "infectionTransform") :: Exp V M33F
+        transform = Uni (IM33F transName) :: Exp V M33F
         (pos, uv) = untup2 attr
+
+    textFragmentShader uv = FragmentOut (pack' (V4 result result result result) :. ZT)
+      where
+        result = step distance
+        distance = sampleDistance "fontAtlas" uv
+        step = smoothstep' (floatF 0.5 @- outlineWidth) (floatF 0.5 @+ outlineWidth)
+        outlineWidth = Uni (IFloat "outlineWidth") :: Exp F Float
 
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
