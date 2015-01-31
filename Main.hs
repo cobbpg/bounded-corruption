@@ -7,8 +7,7 @@ import Data.Time.Clock
 import qualified Data.Trie as T
 import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as MV
-import "GLFW-b" Graphics.UI.GLFW (WindowHint(..), OpenGLProfile(..), Key(..), KeyState(..))
-import qualified "GLFW-b" Graphics.UI.GLFW as GLFW
+import "GLFW-b" Graphics.UI.GLFW as GLFW
 import LambdaCube.Font.Common
 import LambdaCube.GL
 import LambdaCube.GL.Mesh
@@ -48,10 +47,15 @@ loadLevel :: FilePath -> IO SpreadState
 loadLevel path = do
     levelData <- readFile path
     s <- createEmptyState
-    forM_ (zip (lines levelData) [0..]) $ \(line, y) -> do
+    forM_ (zip (reverse (lines levelData)) [0..]) $ \(line, y) -> do
         forM_ (zip line [0..]) $ \(char, x) -> do
             case char of
                 '#' -> conditionSpot s x y (-1)
+                '1' -> conditionSpot s x y (0.15)
+                '2' -> conditionSpot s x y (0.3)
+                '3' -> conditionSpot s x y (0.45)
+                '4' -> conditionSpot s x y (0.6)
+                '5' -> conditionSpot s x y (0.75)
                 _ -> return ()
     return s
 
@@ -76,12 +80,12 @@ spreadInfection (I ci pi sf) threshold = do
             dif n = if abs d < threshold then 0 else if d > 0 then d * receiveFactor else d * sendFactor
               where
                 d = n - cur
-        MV.unsafeWrite ci (x ^* y) (max 0 (cur + sum difs * (1 + fac)))
+        MV.unsafeWrite ci (x ^* y) (min 10 (max 0 (cur + sum difs * (1 + fac))))
 
 createInfectionTexture :: IO TextureData
 createInfectionTexture = do
     bmp <- emptyBitmap (size, size) 4 Nothing
-    compileTexture2DRGBAF False False (unsafeFreezeBitmap bmp)
+    compileTexture2DRGBAF False True (unsafeFreezeBitmap bmp)
 
 updateInfectionTexture :: TextureData -> SpreadState -> IO ()
 updateInfectionTexture tex (I ci _ sf) = do
@@ -97,18 +101,18 @@ updateInfectionTexture tex (I ci _ sf) = do
 main :: IO ()
 main = do
     GLFW.init
-    GLFW.defaultWindowHints
-    mapM_ GLFW.windowHint
+    defaultWindowHints
+    mapM_ windowHint
       [ WindowHint'ContextVersionMajor 3
       , WindowHint'ContextVersionMinor 2
       , WindowHint'OpenGLProfile OpenGLProfile'Core
       , WindowHint'OpenGLForwardCompat True
       ]
-    Just mainWindow <- GLFW.createWindow windowWidth windowHeight "Spreddit!" Nothing Nothing
-    GLFW.makeContextCurrent (Just mainWindow)
+    Just mainWindow <- createWindow windowWidth windowHeight "Bounded Corruption" Nothing Nothing
+    makeContextCurrent (Just mainWindow)
 
     let keyIsPressed key = do
-            keyState <- GLFW.getKey mainWindow key
+            keyState <- getKey mainWindow key
             return (keyState == KeyState'Pressed)
 
     renderer <- compileRenderer (ScreenOut (PrjFrameBuffer "" tix0 renderInfection))
@@ -125,29 +129,27 @@ main = do
 
     args <- getArgs
     s <- case args of
-        [] -> do
-            s <- createEmptyState
-            forM_ [4..27] $ \x -> conditionSpot s x 15 (1)
-            forM_ [4..27] $ \x -> conditionSpot s x 14 (0.5)
-            forM_ [16..30] $ \y -> conditionSpot s 15 y (-1)
-            return s
-        (path:_) -> do
-            loadLevel path
-    infectSpot s 4 7 3
-    infectSpot s 36 21 10
+        [] -> createEmptyState
+        (path:_) -> loadLevel path
     fix $ \loop -> do
         forM_ [0, 0.2, 0.4] (spreadInfection s)
         let aspect = fromIntegral windowHeight / fromIntegral windowWidth
         uniformM33F "infectionTransform" uniforms (V3 (V3 (2 * aspect) 0 0) (V3 0 2 0) (V3 (-aspect) (-1) 1))
         updateInfectionTexture infectionMap s
         render renderer
-        GLFW.swapBuffers mainWindow
-        GLFW.pollEvents
+        swapBuffers mainWindow
+        pollEvents
         escPressed <- keyIsPressed Key'Escape
+        mousePressed <- getMouseButton mainWindow MouseButton'1
+        when (mousePressed == MouseButtonState'Pressed) $ do
+            (mx, my) <- getCursorPos mainWindow
+            let x = round ((mx - 128) / 12)
+                y = 63 - round (my / 12)
+            infectSpot s x y 10
         unless escPressed loop
 
-    GLFW.destroyWindow mainWindow
-    GLFW.terminate
+    destroyWindow mainWindow
+    terminate
 
 renderInfection :: Exp Obj (FrameBuffer 1 V4F)
 renderInfection = renderQuad emptyBuffer
@@ -168,7 +170,10 @@ renderInfection = renderQuad emptyBuffer
 
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
-        smp = texture' (Sampler LinearFilter Repeat tex) uv
+        smp = pack' (V4 inf' z sf' z)
+        inf' = Cond (inf @< floatF 0.1) (floatF 0) (floatF 1)
+        sf' = Cond (sf @< floatF 0.25) (floatF 0) (round' (sf @* floatF 10) @/ floatF 10)
+        V4 inf z sf _ = unpack' (texture' (Sampler LinearFilter Repeat tex) uv)
         tex = TextureSlot "infectionMap" (Texture2D (Float RGBA) n1)
 
 quadMesh :: Mesh
