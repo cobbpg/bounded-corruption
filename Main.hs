@@ -151,12 +151,13 @@ main = do
     let addTextObject text hasOwnUniforms = do
             textMesh <- buildTextMesh atlas textStyle text
             textBuffer <- compileMesh textMesh
-            addMesh renderer "textMesh" textBuffer (if hasOwnUniforms then ["textTransform", "outlineWidth"] else [])
-        setTextUniforms uniforms scale x y = do
+            addMesh renderer "textMesh" textBuffer (if hasOwnUniforms then ["textTransform", "outlineWidth", "textOpacity"] else [])
+        setTextUniforms uniforms scale opacity x y = do
             uniformM33F "textTransform" uniforms (V3 (V3 (scale * aspect) 0 0) (V3 0 scale 0) (V3 (x - aspect) (y - 1) 1))
             uniformFloat "outlineWidth" uniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * scale * sqrt 2 * 0.75)))
+            uniformFloat "textOpacity" uniforms opacity
 
-    setTextUniforms uniforms 0.15 0 0.015
+    setTextUniforms uniforms 0.15 1 0 0.015
 
     quadBuffer <- compileMesh quadMesh
     quadObject <- addMesh renderer "infectionMesh" quadBuffer []
@@ -204,7 +205,7 @@ main = do
                 itemCount = length textObjects
                 showBest result = do
                     textObject <- addTextObject ("Best: " ++ if result > 0 then show result else "N/A") True
-                    setTextUniforms (objectUniformSetter textObject) 0.2 0 0.3
+                    setTextUniforms (objectUniformSetter textObject) 0.2 0.8 0 0.3
                     return textObject
             results <- loadResults itemCount
             bestObject <- showBest (head results)
@@ -212,7 +213,7 @@ main = do
             chosenItem <- flip fix (startTime, 0, replicate itemCount 0, bestObject, False, False) $ \loop (prevTime, n, xs, bestObject, upWasPressed, downWasPressed) -> do
                 curTime <- getCurrentTime
                 forM_ (zip3 textObjects [0..] xs) $ \(textObject, index, x) -> do
-                    setTextUniforms (objectUniformSetter textObject) (0.2 + x * 0.06) (x * 0.05) (0.2 * (7 - index))
+                    setTextUniforms (objectUniformSetter textObject) (0.2 + x * 0.06) (0.5 + x * 0.5) (x * 0.05) (0.2 * (7 - index))
                 render renderer
                 swapBuffers mainWindow
                 pollEvents
@@ -292,10 +293,11 @@ renderInfection = renderText (renderQuad emptyBuffer)
 
     textFragmentShader uv = FragmentOut (pack' (V4 result result result result) :. ZT)
       where
-        result = step distance
+        result = step distance @* opacity
         distance = sampleDistance "fontAtlas" uv
         step = smoothstep' (floatF 0.5 @- outlineWidth) (floatF 0.5 @+ outlineWidth)
         outlineWidth = Uni (IFloat "outlineWidth") :: Exp F Float
+        opacity = Uni (IFloat "textOpacity") :: Exp F Float
 
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
