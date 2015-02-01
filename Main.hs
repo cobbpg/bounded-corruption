@@ -325,17 +325,18 @@ renderInfection = renderText (renderQuad emptyBuffer)
 
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
-        z = floatF 0
-        bkg = pack' (V4 z z fac' z)
-        frg = pack' (V4 z (floatF 0.3 @+ surf @* floatF 0.7) z z)
+        bkgDark = pack' (V4 (floatF 0.12) (floatF 0.15) (floatF 0.1) (floatF 0))
+        bkgLight = pack' (V4 (floatF 0.33) (floatF 0.33) (floatF 0.55) (floatF 0))
+        bkg = Cond (fac' @< floatF 1) (bkgDark @* fac') (bkgDark @+ (bkgLight @- bkgDark) @* (fac' @- floatF 1))
+        frg = pack' (V4 (floatF 0.15 @+ surf @* floatF 0.25) (floatF 0.4 @+ surf @* floatF 0.6) (floatF 0) (floatF 0))
         smp = frg @* inf' @+ bkg @* (floatF 1 @- inf')
         V4 su sv _ _ = unpack' (fract' uv')
         surf = vignette @* max' (floatF 0) (max' diagLeft (Cond (su @< floatF 1 @- sv) diagRight (floatF 0)))
         vignette = smoothstep' (floatF 0.48) (floatF 0.4) (max' (abs' (floatF 0.5 @- su)) (abs' (floatF 0.5 @- sv)))
         diagRight = floatF 1 @- abs' (su @- sv) @* floatF 6
         diagLeft = floatF 1 @- abs' (su @+ sv @- floatF 1) @* floatF 6
-        inf' = smoothstep' (floatF 0.05) (floatF 0.15) inf
-        fac' = Cond (fac @< floatF 0.25) (floatF 0) (round' (fac @* floatF 10) @/ floatF 10)
+        inf' = smoothstep' (floatF 0.05) (floatF 0.15) inf @* floatF 0.8
+        fac' = Cond (fac @< floatF 0.25) (floatF 0) (round' (fac @* floatF 10) @/ floatF 5)
         V4 inf fac _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) uv)
         tex = TextureSlot "infectionMap" (Texture2D (Float RGBA) n1)
         uv' = texture' (Sampler LinearFilter Repeat uvMap) uv
