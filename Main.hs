@@ -85,6 +85,15 @@ spreadInfection (I ci pi sf) threshold = do
                 d = n - cur
         MV.unsafeWrite ci (x ^* y) (min 10 (max 0 (cur + sum difs * (1 + fac))))
 
+isComplete :: SpreadState -> IO Bool
+isComplete (I ci _ sf) = do
+    let accum sum ix = do
+            cur <- MV.unsafeRead ci ix
+            fac <- MV.unsafeRead sf ix
+            return $! sum + if fac < 0 || cur > 0.08 then 1 else 0
+    sum <- foldM accum 0 [0..size * size - 1]
+    return $ sum >= fromIntegral (size * size) * 0.999
+
 createInfectionTexture :: IO TextureData
 createInfectionTexture = do
     bmp <- emptyBitmap (size, size) 4 Nothing
@@ -156,8 +165,9 @@ main = do
         (path:_) -> loadLevel path
     flip fix (0, False, textObject) $ \loop (powerUsed, mouseWasPressed, oldTextObject) -> do
         forM_ [0, 0.2, 0.4] (spreadInfection s)
-        updateInfectionTexture infectionMap s
-        textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed)
+        complete <- isComplete s
+        unless complete (updateInfectionTexture infectionMap s)
+        textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed ++ if complete then "!" else "")
         textBuffer <- compileMesh textMesh
         removeObject renderer oldTextObject
         newTextObject <- addMesh renderer "textMesh" textBuffer []
@@ -173,7 +183,7 @@ main = do
             let x = round ((mx - 128) / 12)
                 y = 63 - round (my / 12)
             infectSpot s x y 10
-        let powerUsed' = powerUsed + 1 + if mouseClicked then 100 else 0
+        let powerUsed' = powerUsed + (if complete then 0 else 1) + (if mouseClicked then 100 else 0)
         unless escPressed $ loop (powerUsed', mousePressed, newTextObject)
 
     destroyWindow mainWindow
