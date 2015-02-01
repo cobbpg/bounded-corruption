@@ -3,6 +3,7 @@
 import Control.Monad
 import Control.Monad.Fix
 import Data.Bitmap.IO
+import qualified Data.ByteString as BS
 import Data.Time.Clock
 import qualified Data.Trie as T
 import qualified Data.Vector.Storable as SV
@@ -190,7 +191,7 @@ main = do
                     infectSpot gameState x y 10
                 let powerUsed' = powerUsed + (if stepping then 1 else 0) + (if mouseClicked then 100 else 0)
                 if escPressed || complete
-                    then removeObject renderer newTextObject >> return powerUsed
+                    then removeObject renderer newTextObject >> return (if escPressed then -1 else powerUsed)
                     else loop (curTime, nextStepTime, powerUsed', mousePressed, newTextObject)
 
     let showMenu = do
@@ -200,8 +201,19 @@ main = do
                 addMesh renderer "textMesh" textBuffer ["textTransform", "outlineWidth"]
             let textScale = 0.25
                 itemCount = length textObjects
+                showBest result = do
+                    textMesh <- buildTextMesh atlas textStyle ("Best: " ++ if result > 0 then show result else "N/A")
+                    textBuffer <- compileMesh textMesh
+                    textObject <- addMesh renderer "textMesh" textBuffer ["textTransform", "outlineWidth"]
+                    let textUniforms = objectUniformSetter textObject
+                        textScale = 0.2
+                    uniformM33F "textTransform" textUniforms (V3 (V3 (textScale * aspect) 0 0) (V3 0 textScale 0) (V3 (-aspect) (-1 + textScale * (0.1 + 1.5)) 1))
+                    uniformFloat "outlineWidth" textUniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale * sqrt 2 * 0.75)))
+                    return textObject
+            results <- loadResults itemCount
+            bestObject <- showBest (head results)
             startTime <- getCurrentTime
-            chosenItem <- flip fix (startTime, 0, replicate itemCount 0, False, False) $ \loop (prevTime, n, xs, upWasPressed, downWasPressed) -> do
+            chosenItem <- flip fix (startTime, 0, replicate itemCount 0, bestObject, False, False) $ \loop (prevTime, n, xs, bestObject, upWasPressed, downWasPressed) -> do
                 curTime <- getCurrentTime
                 forM_ (zip3 textObjects [0..] xs) $ \(textObject, index, x) -> do
                     let textUniforms = objectUniformSetter textObject
@@ -218,10 +230,16 @@ main = do
                         | index == n = min 1 (x + dt * 5)
                         | otherwise  = max 0 (x - dt * 5)
                     dt = realToFrac (diffUTCTime curTime prevTime)
+                bestObject' <-
+                    if n /= n'
+                    then do
+                        removeObject renderer bestObject
+                        showBest (results !! n')
+                    else return bestObject
                 case () of
-                    _ | enterPressed -> return n
-                      | escPressed -> return (-1)
-                      | otherwise -> loop (curTime, n', xs', upPressed, downPressed)
+                    _ | enterPressed -> removeObject renderer bestObject >> return n
+                      | escPressed -> removeObject renderer bestObject >> return (-1)
+                      | otherwise -> loop (curTime, n', xs', bestObject', upPressed, downPressed)
             mapM_ (removeObject renderer) textObjects
             return chosenItem
 
@@ -230,10 +248,31 @@ main = do
         chosenItem <- showMenu
         if chosenItem < 0
             then return ()
-            else playLevel (levels !! chosenItem) >> loop
+            else do
+            newResult <- playLevel (levels !! chosenItem)
+            results <- loadResults (length levels)
+            let previousResult = results !! chosenItem
+            when (newResult > 0 && (previousResult < 0 || newResult < previousResult)) $ do
+                let results' = zipWith updateResult results [0..]
+                    updateResult oldResult index
+                        | index == chosenItem = newResult
+                        | otherwise           = oldResult
+                saveResults results'
+            loop
 
     destroyWindow mainWindow
     terminate
+
+loadResults :: Int -> IO [Int]
+loadResults count = do
+    resultsText <- BS.readFile "results.txt"
+    let resultsText' = map (toEnum . fromIntegral) (BS.unpack resultsText)
+        results = take count (map read (lines resultsText') ++ repeat (-1))
+    return results
+
+saveResults :: [Int] -> IO ()
+saveResults results = do
+    writeFile "results.txt" (unlines (map show results))
 
 renderInfection :: Exp Obj (FrameBuffer 1 V4F)
 renderInfection = renderText (renderQuad emptyBuffer)
