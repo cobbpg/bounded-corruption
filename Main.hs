@@ -146,7 +146,7 @@ main = do
 
     uniformFTexture2D "fontAtlas" uniforms (getTextureData atlas)
 
-    textMesh <- buildTextMesh atlas textStyle "POWER: 0"
+    textMesh <- buildTextMesh atlas textStyle ""
     textBuffer <- compileMesh textMesh
     textObject <- addMesh renderer "textMesh" textBuffer []
     let textScale = 0.15
@@ -160,41 +160,77 @@ main = do
     uniformFTexture2D "infectionMap" uniforms infectionMap
     uniformM33F "infectionTransform" uniforms (V3 (V3 (2 * aspect) 0 0) (V3 0 2 0) (V3 (-aspect) (-1) 1))
 
-    startTime <- getCurrentTime
+    let playLevel path = do
+            gameState <- loadLevel path
+            startTime <- getCurrentTime
+            flip fix (startTime, 0, 0, False, textObject) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
+                curTime <- getCurrentTime
+                complete <- isComplete gameState
+                let stepTime' = stepTime + realToFrac (diffUTCTime curTime prevTime)
+                    stepping = not complete && stepTime' > stepLength
+                    nextStepTime = if stepping then stepTime' - stepLength else stepTime'
+                when stepping $ do
+                    forM_ [0, 0.2, 0.4] (spreadInfection gameState)
+                    updateInfectionTexture infectionMap gameState
+                textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed)
+                textBuffer <- compileMesh textMesh
+                removeObject renderer oldTextObject
+                newTextObject <- addMesh renderer "textMesh" textBuffer []
+                render renderer
+                swapBuffers mainWindow
+                pollEvents
+                escPressed <- keyIsPressed Key'Escape
+                mouseState <- getMouseButton mainWindow MouseButton'1
+                let mousePressed = mouseState == MouseButtonState'Pressed
+                    mouseClicked = mousePressed && not mouseWasPressed
+                when mouseClicked $ do
+                    (mx, my) <- getCursorPos mainWindow
+                    let x = round ((mx - 128) / 12)
+                        y = 63 - round (my / 12)
+                    infectSpot gameState x y 10
+                let powerUsed' = powerUsed + (if stepping then 1 else 0) + (if mouseClicked then 100 else 0)
+                if escPressed || complete
+                    then removeObject renderer newTextObject >> return powerUsed
+                    else loop (curTime, nextStepTime, powerUsed', mousePressed, newTextObject)
 
-    args <- getArgs
-    s <- case args of
-        [] -> createEmptyState
-        (path:_) -> loadLevel path
+    let showMenu = do
+            textObjects <- forM [1..3] $ \n -> do
+                textMesh <- buildTextMesh atlas textStyle ("Level " ++ show n)
+                textBuffer <- compileMesh textMesh
+                addMesh renderer "textMesh" textBuffer ["textTransform", "outlineWidth"]
+            let textScale = 0.25
+                itemCount = length textObjects
+            startTime <- getCurrentTime
+            chosenItem <- flip fix (startTime, 0, replicate itemCount 0, False, False) $ \loop (prevTime, n, xs, upWasPressed, downWasPressed) -> do
+                curTime <- getCurrentTime
+                forM_ (zip3 textObjects [0..] xs) $ \(textObject, index, x) -> do
+                    let textUniforms = objectUniformSetter textObject
+                        textScale' = textScale + x * 0.03
+                    uniformM33F "textTransform" textUniforms (V3 (V3 (textScale' * aspect) 0 0) (V3 0 textScale' 0) (V3 (-aspect + x * 0.1) (-1 + textScale * (0.1 + 5 - index)) 1))
+                    uniformFloat "outlineWidth" textUniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale' * sqrt 2 * 0.75)))
+                render renderer
+                swapBuffers mainWindow
+                pollEvents
+                [escPressed, enterPressed, upPressed, downPressed] <- mapM keyIsPressed [Key'Escape, Key'Enter, Key'Up, Key'Down]
+                let n' = (n - (if not upWasPressed && upPressed then 1 else 0) + (if not downWasPressed && downPressed then 1 else 0)) `mod` itemCount
+                    xs' = zipWith moveItem xs [0..]
+                    moveItem x index
+                        | index == n = min 1 (x + dt * 5)
+                        | otherwise  = max 0 (x - dt * 5)
+                    dt = realToFrac (diffUTCTime curTime prevTime)
+                case () of
+                    _ | enterPressed -> return n
+                      | escPressed -> return (-1)
+                      | otherwise -> loop (curTime, n', xs', upPressed, downPressed)
+            mapM_ (removeObject renderer) textObjects
+            return chosenItem
 
-    startTime <- getCurrentTime
-    flip fix (startTime, 0, 0, False, textObject) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
-        curTime <- getCurrentTime
-        complete <- isComplete s
-        let stepTime' = stepTime + realToFrac (diffUTCTime curTime prevTime)
-            stepping = not complete && stepTime' > stepLength
-            nextStepTime = if stepping then stepTime' - stepLength else stepTime'
-        when stepping $ do
-            forM_ [0, 0.2, 0.4] (spreadInfection s)
-            updateInfectionTexture infectionMap s
-        textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed ++ if complete then "!" else "")
-        textBuffer <- compileMesh textMesh
-        removeObject renderer oldTextObject
-        newTextObject <- addMesh renderer "textMesh" textBuffer []
-        render renderer
-        swapBuffers mainWindow
-        pollEvents
-        escPressed <- keyIsPressed Key'Escape
-        mouseState <- getMouseButton mainWindow MouseButton'1
-        let mousePressed = mouseState == MouseButtonState'Pressed
-            mouseClicked = mousePressed && not mouseWasPressed
-        when mouseClicked $ do
-            (mx, my) <- getCursorPos mainWindow
-            let x = round ((mx - 128) / 12)
-                y = 63 - round (my / 12)
-            infectSpot s x y 10
-        let powerUsed' = powerUsed + (if stepping then 1 else 0) + (if mouseClicked then 100 else 0)
-        unless escPressed $ loop (curTime, nextStepTime, powerUsed', mousePressed, newTextObject)
+    let levels = ["level1.txt", "level2.txt", "level3.txt"]
+    fix $ \loop -> do
+        chosenItem <- showMenu
+        if chosenItem < 0
+            then return ()
+            else playLevel (levels !! chosenItem) >> loop
 
     destroyWindow mainWindow
     terminate
