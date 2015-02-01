@@ -22,6 +22,7 @@ data SpreadState
       { currentIntensity :: MV.IOVector Float
       , previousIntensity :: MV.IOVector Float
       , spreadFactor :: MV.IOVector Float
+      , textureBytes :: MV.IOVector Word8
       }
 
 windowWidth, windowHeight :: Num n => n
@@ -48,7 +49,8 @@ createEmptyState = do
     ci <- MV.replicate (size * size) 0
     pi <- MV.replicate (size * size) 0
     sf <- MV.replicate (size * size) 0
-    return (I ci pi sf)
+    tb <- MV.replicate (size * size * 4) 0
+    return (I ci pi sf tb)
 
 loadLevel :: FilePath -> IO SpreadState
 loadLevel path = do
@@ -67,15 +69,15 @@ loadLevel path = do
     return s
 
 infectSpot :: SpreadState -> Int -> Int -> Float -> IO ()
-infectSpot (I ci _ _) x y s = do
+infectSpot (I ci _ _ _) x y s = do
     MV.unsafeWrite ci (x ^* y) s
 
 conditionSpot :: SpreadState -> Int -> Int -> Float -> IO ()
-conditionSpot (I _ _ sf) x y s = do
+conditionSpot (I _ _ sf _) x y s = do
     MV.unsafeWrite sf (x ^* y) s
 
 spreadInfection :: SpreadState -> Float -> IO ()
-spreadInfection (I ci pi sf) threshold = do
+spreadInfection (I ci pi sf _) threshold = do
     MV.unsafeCopy pi ci
     forM_ [0..size - 1] $ \y -> forM_ [0..size - 1] $ \x -> do
         cur <- MV.unsafeRead pi (x ^* y)
@@ -90,7 +92,7 @@ spreadInfection (I ci pi sf) threshold = do
         MV.unsafeWrite ci (x ^* y) (min 10 (max 0 (cur + sum difs * (1 + fac))))
 
 isComplete :: SpreadState -> IO Bool
-isComplete (I ci _ sf) = do
+isComplete (I ci _ sf _) = do
     let accum sum ix = do
             cur <- MV.unsafeRead ci ix
             fac <- MV.unsafeRead sf ix
@@ -104,14 +106,13 @@ createInfectionTexture = do
     compileTexture2DRGBAF False True (unsafeFreezeBitmap bmp)
 
 updateInfectionTexture :: TextureData -> SpreadState -> IO ()
-updateInfectionTexture tex (I ci _ sf) = do
-    bytes <- MV.replicate (size * size * 4) 0
+updateInfectionTexture tex (I ci _ sf tb) = do
     forM_ [0..size * size - 1] $ \ix -> do
-        red <- MV.unsafeRead ci ix
-        blue <- MV.unsafeRead sf ix
-        MV.unsafeWrite bytes (ix * 4) (round (max 0 (min 1 red) * 255))
-        MV.unsafeWrite bytes (ix * 4 + 2) (round (max 0 (min 1 (blue + 0.5)) * 255))
-    bmp <- MV.unsafeWith bytes $ \ptr -> copyBitmapFromPtr (size, size) 4 0 ptr Nothing
+        inf <- MV.unsafeRead ci ix
+        fac <- MV.unsafeRead sf ix
+        MV.unsafeWrite tb (ix * 4) (round (max 0 (min 1 inf) * 255))
+        MV.unsafeWrite tb (ix * 4 + 1) (round (max 0 (min 1 (fac + 0.5)) * 255))
+    bmp <- MV.unsafeWith tb $ \ptr -> copyBitmapFromPtr (size, size) 4 0 ptr Nothing
     updateTexture2DRGBAF tex False (unsafeFreezeBitmap bmp)
 
 textStyle = defaultTextStyle { textLetterSpacing = 0.0, textLineHeight = 1.25 }
@@ -306,10 +307,11 @@ renderInfection = renderText (renderQuad emptyBuffer)
 
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
-        smp = pack' (V4 inf' z sf' z)
+        z = floatF 0
+        smp = pack' (V4 inf' z fac' z)
         inf' = Cond (inf @< floatF 0.1) (floatF 0) (floatF 1)
-        sf' = Cond (sf @< floatF 0.25) (floatF 0) (round' (sf @* floatF 10) @/ floatF 10)
-        V4 inf z sf _ = unpack' (texture' (Sampler LinearFilter Repeat tex) uv)
+        fac' = Cond (fac @< floatF 0.25) (floatF 0) (round' (fac @* floatF 10) @/ floatF 10)
+        V4 inf fac _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) uv)
         tex = TextureSlot "infectionMap" (Texture2D (Float RGBA) n1)
 
 quadMesh :: Mesh
@@ -323,7 +325,7 @@ quadMesh = Mesh
     }
 
 printState :: SpreadState -> IO ()
-printState (I ci _ sf) = do
+printState (I ci _ sf _) = do
     putStr "\ESC[0;0H"
     forM_ [0..size - 1] $ \y -> do
         forM_ [0..size - 1] $ \x -> do
