@@ -148,12 +148,15 @@ main = do
 
     uniformFTexture2D "fontAtlas" uniforms (getTextureData atlas)
 
-    textMesh <- buildTextMesh atlas textStyle ""
-    textBuffer <- compileMesh textMesh
-    textObject <- addMesh renderer "textMesh" textBuffer []
-    let textScale = 0.15
-    uniformM33F "textTransform" uniforms (V3 (V3 (textScale * aspect) 0 0) (V3 0 textScale 0) (V3 (-aspect) (-1 + textScale * 0.1) 1))
-    uniformFloat "outlineWidth" uniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale * sqrt 2 * 0.75)))
+    let addTextObject text hasOwnUniforms = do
+            textMesh <- buildTextMesh atlas textStyle text
+            textBuffer <- compileMesh textMesh
+            addMesh renderer "textMesh" textBuffer (if hasOwnUniforms then ["textTransform", "outlineWidth"] else [])
+        setTextUniforms uniforms scale x y = do
+            uniformM33F "textTransform" uniforms (V3 (V3 (scale * aspect) 0 0) (V3 0 scale 0) (V3 (x - aspect) (y - 1) 1))
+            uniformFloat "outlineWidth" uniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * scale * sqrt 2 * 0.75)))
+
+    setTextUniforms uniforms 0.15 0 0.015
 
     quadBuffer <- compileMesh quadMesh
     quadObject <- addMesh renderer "infectionMesh" quadBuffer []
@@ -165,7 +168,7 @@ main = do
     let playLevel path = do
             gameState <- loadLevel path
             startTime <- getCurrentTime
-            flip fix (startTime, 0, 0, False, textObject) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
+            flip fix (startTime, 0, 0, False, Nothing) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
                 curTime <- getCurrentTime
                 complete <- isComplete gameState
                 let stepTime' = stepTime + realToFrac (diffUTCTime curTime prevTime)
@@ -174,10 +177,10 @@ main = do
                 when stepping $ do
                     forM_ [0, 0.2, 0.4] (spreadInfection gameState)
                     updateInfectionTexture infectionMap gameState
-                textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed)
-                textBuffer <- compileMesh textMesh
-                removeObject renderer oldTextObject
-                newTextObject <- addMesh renderer "textMesh" textBuffer []
+                case oldTextObject of
+                    Just textObject -> removeObject renderer textObject
+                    Nothing -> return ()
+                newTextObject <- addTextObject ("POWER: " ++ show powerUsed) False
                 render renderer
                 swapBuffers mainWindow
                 pollEvents
@@ -193,23 +196,15 @@ main = do
                 let powerUsed' = powerUsed + (if stepping then 1 else 0) + (if mouseClicked then 100 else 0)
                 if escPressed || complete
                     then removeObject renderer newTextObject >> return (if escPressed then -1 else powerUsed)
-                    else loop (curTime, nextStepTime, powerUsed', mousePressed, newTextObject)
+                    else loop (curTime, nextStepTime, powerUsed', mousePressed, Just newTextObject)
 
     let showMenu = do
-            textObjects <- forM [1..3] $ \n -> do
-                textMesh <- buildTextMesh atlas textStyle ("Level " ++ show n)
-                textBuffer <- compileMesh textMesh
-                addMesh renderer "textMesh" textBuffer ["textTransform", "outlineWidth"]
+            textObjects <- forM [1..3] $ \n -> addTextObject ("Level " ++ show n) True
             let textScale = 0.25
                 itemCount = length textObjects
                 showBest result = do
-                    textMesh <- buildTextMesh atlas textStyle ("Best: " ++ if result > 0 then show result else "N/A")
-                    textBuffer <- compileMesh textMesh
-                    textObject <- addMesh renderer "textMesh" textBuffer ["textTransform", "outlineWidth"]
-                    let textUniforms = objectUniformSetter textObject
-                        textScale = 0.2
-                    uniformM33F "textTransform" textUniforms (V3 (V3 (textScale * aspect) 0 0) (V3 0 textScale 0) (V3 (-aspect) (-1 + textScale * (0.1 + 1.5)) 1))
-                    uniformFloat "outlineWidth" textUniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale * sqrt 2 * 0.75)))
+                    textObject <- addTextObject ("Best: " ++ if result > 0 then show result else "N/A") True
+                    setTextUniforms (objectUniformSetter textObject) 0.2 0 0.3
                     return textObject
             results <- loadResults itemCount
             bestObject <- showBest (head results)
@@ -217,10 +212,7 @@ main = do
             chosenItem <- flip fix (startTime, 0, replicate itemCount 0, bestObject, False, False) $ \loop (prevTime, n, xs, bestObject, upWasPressed, downWasPressed) -> do
                 curTime <- getCurrentTime
                 forM_ (zip3 textObjects [0..] xs) $ \(textObject, index, x) -> do
-                    let textUniforms = objectUniformSetter textObject
-                        textScale' = textScale + x * 0.03
-                    uniformM33F "textTransform" textUniforms (V3 (V3 (textScale' * aspect) 0 0) (V3 0 textScale' 0) (V3 (-aspect + x * 0.1) (-1 + textScale * (0.1 + 5 - index)) 1))
-                    uniformFloat "outlineWidth" textUniforms (min 0.5 (fromIntegral letterScale / (windowHeight * fromIntegral letterPadding * textScale' * sqrt 2 * 0.75)))
+                    setTextUniforms (objectUniformSetter textObject) (0.2 + x * 0.06) (x * 0.05) (0.2 * (7 - index))
                 render renderer
                 swapBuffers mainWindow
                 pollEvents
