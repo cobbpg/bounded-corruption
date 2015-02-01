@@ -36,6 +36,9 @@ sendFactor = 0.125
 receiveFactor :: Float
 receiveFactor = 0.25
 
+stepLength :: Float
+stepLength = 1 / 30
+
 (^*) :: Int -> Int -> Int
 x ^* y = x + y * size
 
@@ -163,10 +166,17 @@ main = do
     s <- case args of
         [] -> createEmptyState
         (path:_) -> loadLevel path
-    flip fix (0, False, textObject) $ \loop (powerUsed, mouseWasPressed, oldTextObject) -> do
-        forM_ [0, 0.2, 0.4] (spreadInfection s)
+
+    startTime <- getCurrentTime
+    flip fix (startTime, 0, 0, False, textObject) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
+        curTime <- getCurrentTime
         complete <- isComplete s
-        unless complete (updateInfectionTexture infectionMap s)
+        let stepTime' = stepTime + realToFrac (diffUTCTime curTime prevTime)
+            stepping = not complete && stepTime' > stepLength
+            nextStepTime = if stepping then stepTime' - stepLength else stepTime'
+        when stepping $ do
+            forM_ [0, 0.2, 0.4] (spreadInfection s)
+            updateInfectionTexture infectionMap s
         textMesh <- buildTextMesh atlas textStyle ("POWER: " ++ show powerUsed ++ if complete then "!" else "")
         textBuffer <- compileMesh textMesh
         removeObject renderer oldTextObject
@@ -183,8 +193,8 @@ main = do
             let x = round ((mx - 128) / 12)
                 y = 63 - round (my / 12)
             infectSpot s x y 10
-        let powerUsed' = powerUsed + (if complete then 0 else 1) + (if mouseClicked then 100 else 0)
-        unless escPressed $ loop (powerUsed', mousePressed, newTextObject)
+        let powerUsed' = powerUsed + (if stepping then 1 else 0) + (if mouseClicked then 100 else 0)
+        unless escPressed $ loop (curTime, nextStepTime, powerUsed', mousePressed, newTextObject)
 
     destroyWindow mainWindow
     terminate
