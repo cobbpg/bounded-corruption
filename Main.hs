@@ -41,6 +41,9 @@ receiveFactor = 0.25
 stepLength :: Float
 stepLength = 1 / 30
 
+uvMapSize :: Num n => n
+uvMapSize = 256
+
 (^*) :: Int -> Int -> Int
 x ^* y = x + y * size
 
@@ -141,11 +144,28 @@ main = do
 
     renderer <- compileRenderer (ScreenOut (PrjFrameBuffer "" tix0 renderInfection))
     setScreenSize renderer windowWidth windowHeight
+
+    let makeSamplerOut = SamplerOut "uvMap" . Sampler LinearFilter Repeat . Texture (Texture2D (Float RGBA) n1) (V2 uvMapSize uvMapSize) NoMip
+    uvRenderer <- compileRenderer (makeSamplerOut [PrjFrameBuffer "" tix0 renderUV])
+    setScreenSize uvRenderer uvMapSize uvMapSize
+
     let uniforms = uniformSetter renderer
+        uvUniforms = uniformSetter uvRenderer
         aspect = fromIntegral windowHeight / fromIntegral windowWidth
         letterScale = atlasLetterScale (atlasOptions atlas)
         letterPadding = atlasLetterPadding (atlasOptions atlas)
+        Just uvMap = T.lookup "uvMap" (samplerOutput uvRenderer)
 
+    uniformFTexture2D "uvMapPrev" uvUniforms uvMap
+    quadBuffer <- compileMesh quadMesh
+    addMesh uvRenderer "quadMesh" quadBuffer []
+
+    uniformFloat "copyFactor" uvUniforms 0
+    render uvRenderer
+    uniformFloat "copyFactor" uvUniforms 1
+    render uvRenderer
+
+    uniformFTexture2D "uvMap" uniforms uvMap
     uniformFTexture2D "fontAtlas" uniforms (getTextureData atlas)
 
     let addTextObject text hasOwnUniforms = do
@@ -159,15 +179,18 @@ main = do
 
     setTextUniforms uniforms 0.15 1 0 0.015
 
-    quadBuffer <- compileMesh quadMesh
     quadObject <- addMesh renderer "infectionMesh" quadBuffer []
 
     infectionMap <- createInfectionTexture
     uniformFTexture2D "infectionMap" uniforms infectionMap
+    uniformFTexture2D "infectionMap" uvUniforms infectionMap
     uniformM33F "infectionTransform" uniforms (V3 (V3 (2 * aspect) 0 0) (V3 0 2 0) (V3 (-aspect) (-1) 1))
 
     let playLevel path = do
             gameState <- loadLevel path
+            uniformFloat "copyFactor" uvUniforms 0
+            render uvRenderer
+            uniformFloat "copyFactor" uvUniforms 1
             startTime <- getCurrentTime
             flip fix (startTime, 0, 0, False, Nothing) $ \loop (prevTime, stepTime, powerUsed, mouseWasPressed, oldTextObject) -> do
                 curTime <- getCurrentTime
@@ -182,6 +205,7 @@ main = do
                     Just textObject -> removeObject renderer textObject
                     Nothing -> return ()
                 newTextObject <- addTextObject ("POWER: " ++ show powerUsed) False
+                render uvRenderer
                 render renderer
                 swapBuffers mainWindow
                 pollEvents
@@ -302,11 +326,63 @@ renderInfection = renderText (renderQuad emptyBuffer)
     quadFragmentShader uv = FragmentOut (smp :. ZT)
       where
         z = floatF 0
-        smp = pack' (V4 inf' z fac' z)
-        inf' = Cond (inf @< floatF 0.1) (floatF 0) (floatF 1)
+        bkg = pack' (V4 z z fac' z)
+        frg = pack' (V4 z (floatF 0.3 @+ surf @* floatF 0.7) z z)
+        smp = frg @* inf' @+ bkg @* (floatF 1 @- inf')
+        V4 su sv _ _ = unpack' (fract' uv')
+        surf = vignette @* max' (floatF 0) (max' diagLeft (Cond (su @< floatF 1 @- sv) diagRight (floatF 0)))
+        vignette = smoothstep' (floatF 0.48) (floatF 0.4) (max' (abs' (floatF 0.5 @- su)) (abs' (floatF 0.5 @- sv)))
+        diagRight = floatF 1 @- abs' (su @- sv) @* floatF 6
+        diagLeft = floatF 1 @- abs' (su @+ sv @- floatF 1) @* floatF 6
+        inf' = smoothstep' (floatF 0.05) (floatF 0.15) inf
         fac' = Cond (fac @< floatF 0.25) (floatF 0) (round' (fac @* floatF 10) @/ floatF 10)
         V4 inf fac _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) uv)
         tex = TextureSlot "infectionMap" (Texture2D (Float RGBA) n1)
+        uv' = texture' (Sampler LinearFilter Repeat uvMap) uv
+        uvMap = TextureSlot "uvMap" (Texture2D (Float RGBA) n1)
+
+renderUV :: Exp Obj (FrameBuffer 1 V4F)
+renderUV = transformMap emptyBuffer
+  where
+    emptyBuffer = FrameBuffer (ColorImage n1 (V4 0 0 0 1) :. ZT)
+    transformMap = Accumulate fragmentCtx PassAll transformFragmentShader transformFragmentStream
+    copyMap = Accumulate fragmentCtx PassAll copyFragmentShader copyFragmentStream (initMap emptyBuffer)
+    initMap = Accumulate fragmentCtx PassAll initFragmentShader initFragmentStream
+    fragmentCtx = AccumulationContext Nothing (ColorOp NoBlending (V4 True True True True) :. ZT)
+    rasterCtx = TriangleCtx CullNone PolygonFill NoOffset LastVertex
+
+    transformFragmentStream = Rasterize rasterCtx (quadStream (const (floatV 1)))
+    copyFragmentStream = Rasterize rasterCtx (quadStream id)
+    initFragmentStream = Rasterize rasterCtx (quadStream (floatV 1 @-))
+    quadStream f = Transform (vertexShader f) (Fetch "quadMesh" Triangles (IV2F "position", IV2F "uv"))
+
+    copyFactor = Uni (IFloat "copyFactor") :: Exp V Float
+
+    vertexShader copyFactorFn attr = VertexOut point (floatV 1) ZT (Smooth uv :. ZT)
+      where
+        point = v3v4 (v2v3 (pos @* floatV 2 @* copyFactorFn copyFactor @- floatV 1))
+        (pos, uv) = untup2 attr
+
+    transformFragmentShader uv = FragmentOut (uvPrev @+ uvDif :. ZT)
+      where
+        uvPrev = texture' (Sampler LinearFilter Repeat uvMap) uv
+        uvDif = pack' (V4 (rt @- lt) (dn @- up) (floatF 0) (floatF 0))
+        V4 up _ _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) (uv @- pack' (V2 (floatF 0) res)))
+        V4 dn _ _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) (uv @+ pack' (V2 (floatF 0) res)))
+        V4 lt _ _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) (uv @- pack' (V2 res (floatF 0))))
+        V4 rt _ _ _ = unpack' (texture' (Sampler LinearFilter Repeat tex) (uv @+ pack' (V2 res (floatF 0))))
+        uvMap = Texture (Texture2D (Float RGBA) n1) (V2 uvMapSize uvMapSize) NoMip [PrjFrameBuffer "uvMapCopy" tix0 copyMap]
+        tex = TextureSlot "infectionMap" (Texture2D (Float RGBA) n1)
+        res = floatF (0.15 / uvMapSize)
+
+    copyFragmentShader uv = FragmentOut (smp :. ZT)
+      where
+        smp = texture' (Sampler LinearFilter Repeat tex) uv
+        tex = TextureSlot "uvMapPrev" (Texture2D (Float RGBA) n1)
+
+    initFragmentShader uv = FragmentOut (pack' (V4 u v (floatF 0) (floatF 0)) :. ZT)
+      where
+        V2 u v = unpack' (uv @* floatF 15)
 
 quadMesh :: Mesh
 quadMesh = Mesh
